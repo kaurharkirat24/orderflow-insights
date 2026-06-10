@@ -21,12 +21,19 @@ Faker.seed(42)
 random.seed(42)
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+FIXED_NOW = datetime(2026, 1, 1, 0, 0, 0)
+UUID_NAMESPACE = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+
+def deterministic_uuid(prefix: str, index: int) -> str:
+    """Create stable UUIDs so repeated generation produces identical data."""
+    return str(uuid.uuid5(UUID_NAMESPACE, f"{prefix}-{index}"))
 
 
 def generate_customers(count: int = 100_000) -> list[dict]:
     """Generate customer records with unique emails."""
     print(f"Generating {count:,} customers...")
-    now = datetime.now()
+    now = FIXED_NOW
     three_years_ago = now - timedelta(days=3 * 365)
     total_seconds = int((now - three_years_ago).total_seconds())
 
@@ -42,7 +49,7 @@ def generate_customers(count: int = 100_000) -> list[dict]:
 
         created_at = three_years_ago + timedelta(seconds=random.randint(0, total_seconds))
         customers.append({
-            "id": str(uuid.uuid4()),
+            "id": deterministic_uuid("customer", i),
             "name": fake.name(),
             "email": email,
             "created_at": created_at.isoformat(),
@@ -58,7 +65,7 @@ def generate_orders(customers: list[dict], count: int = 1_000_000) -> list[dict]
     """Generate order records linked to customers."""
     print(f"Generating {count:,} orders...")
     customer_ids = [c["id"] for c in customers]
-    now = datetime.now()
+    now = FIXED_NOW
     two_years_ago = now - timedelta(days=2 * 365)
     total_seconds = int((now - two_years_ago).total_seconds())
 
@@ -73,7 +80,7 @@ def generate_orders(customers: list[dict], count: int = 1_000_000) -> list[dict]
         created_at = two_years_ago + timedelta(seconds=random.randint(0, total_seconds))
 
         orders.append({
-            "id": str(uuid.uuid4()),
+            "id": deterministic_uuid("order", i),
             "customer_id": customer_id,
             "amount": amount,
             "status": status,
@@ -103,14 +110,14 @@ def generate_refunds(orders: list[dict], count: int = 200_000) -> list[dict]:
 
         # Refund created_at is after order's created_at
         order_dt = datetime.fromisoformat(order["created_at"])
-        max_days_after = (datetime.now() - order_dt).days
+        max_days_after = (FIXED_NOW - order_dt).days
         if max_days_after <= 0:
             max_days_after = 1
         days_after = random.randint(1, min(max_days_after, 90))
         refund_dt = order_dt + timedelta(days=days_after)
 
         refunds.append({
-            "id": str(uuid.uuid4()),
+            "id": deterministic_uuid("refund", i),
             "order_id": order["id"],
             "amount": refund_amount,
             "created_at": refund_dt.isoformat(),

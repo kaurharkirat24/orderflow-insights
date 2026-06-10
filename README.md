@@ -26,7 +26,7 @@ The system follows a **4-layer architecture**:
 
 2. **Mock APIs** (`mock_api/`): FastAPI application on port 8001 serving paginated endpoints for customers, orders, and refunds. Loads JSON data into memory at startup.
 
-3. **Ingestion Service** (`ingestion/ingest.py`): Async service using httpx to fetch all pages concurrently (batches of 50), then bulk-inserts into PostgreSQL using asyncpg with `ON CONFLICT DO NOTHING` for idempotency.
+3. **Ingestion Service** (`ingestion/ingest.py`): Async service using httpx to fetch all pages concurrently (batches of 50), then bulk-inserts into PostgreSQL using asyncpg `COPY` staging tables with `ON CONFLICT DO NOTHING` for idempotency.
 
 4. **Analytics API** (`app/`): FastAPI application on port 8000 with 8 analytics endpoints, all reading from pre-aggregated materialized views and cached in Redis.
 
@@ -46,7 +46,7 @@ Every analytics endpoint checks Redis first (60-second TTL). Cache is automatica
 Uses `httpx.AsyncClient` with `asyncio.gather` to fetch 50 pages concurrently, dramatically reducing ingestion time compared to sequential fetching.
 
 ### Bulk Inserts with asyncpg
-Uses `asyncpg.executemany` with batches of 5,000 records for fast bulk inserts, with `ON CONFLICT DO NOTHING` for idempotent re-runs.
+Uses `asyncpg.copy_records_to_table` into temporary staging tables in batches of 5,000 records, then merges into the final tables with `ON CONFLICT DO NOTHING` for idempotent re-runs.
 
 ### Database Indexes
 5 targeted indexes on orders and refunds tables to optimize the most common query patterns:

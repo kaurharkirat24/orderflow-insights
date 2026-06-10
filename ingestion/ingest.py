@@ -11,6 +11,7 @@ import os
 import time
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 import asyncpg
 import httpx
@@ -58,97 +59,163 @@ async def fetch_all_pages(client: httpx.AsyncClient, endpoint: str) -> list[dict
 
 
 async def insert_customers(conn: asyncpg.Connection, customers: list[dict]):
-    """Bulk insert customers using INSERT ON CONFLICT DO NOTHING for idempotency."""
+    """Bulk insert customers through COPY staging, then merge idempotently."""
     print(f"  Inserting {len(customers):,} customers...")
     batch_size = 5000
     inserted = 0
+    await conn.execute(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS tmp_customers (
+            id UUID,
+            name VARCHAR(255),
+            email VARCHAR(255),
+            created_at TIMESTAMP
+        )
+        """
+    )
     for i in range(0, len(customers), batch_size):
         batch = customers[i:i + batch_size]
-        try:
-            await conn.executemany(
-                """
-                INSERT INTO customers (id, name, email, created_at)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                [
-                    (
-                        uuid.UUID(c["id"]),
-                        c["name"],
-                        c["email"],
-                        datetime.fromisoformat(c["created_at"]),
-                    )
-                    for c in batch
-                ],
+        await conn.execute("TRUNCATE tmp_customers")
+        await conn.copy_records_to_table(
+            "tmp_customers",
+            records=[
+                (
+                    uuid.UUID(c["id"]),
+                    c["name"],
+                    c["email"],
+                    datetime.fromisoformat(c["created_at"]),
+                )
+                for c in batch
+            ],
+        )
+
+        email_conflict = await conn.fetchrow(
+            """
+            SELECT t.email, t.id AS incoming_id, c.id AS existing_id
+            FROM tmp_customers t
+            JOIN customers c ON c.email = t.email
+            WHERE c.id <> t.id
+            LIMIT 1
+            """
+        )
+        if email_conflict:
+            raise RuntimeError(
+                "Existing PostgreSQL data was generated with different customer IDs. "
+                f"Email {email_conflict['email']} already belongs to "
+                f"{email_conflict['existing_id']}, but incoming data uses "
+                f"{email_conflict['incoming_id']}. Reset the Postgres volume or use one "
+                "consistent generated dataset."
             )
-            inserted += len(batch)
-            if inserted % 25_000 == 0 or inserted == len(customers):
-                print(f"    Customers: {inserted:,}/{len(customers):,}")
-        except Exception as e:
-            print(f"    Error inserting customer batch at offset {i}: {e}")
+
+        await conn.execute(
+            """
+            INSERT INTO customers (id, name, email, created_at)
+            SELECT id, name, email, created_at
+            FROM tmp_customers
+            ON CONFLICT (id) DO UPDATE SET
+                name = EXCLUDED.name,
+                email = EXCLUDED.email,
+                created_at = EXCLUDED.created_at
+            """
+        )
+        inserted += len(batch)
+        if inserted % 25_000 == 0 or inserted == len(customers):
+            print(f"    Customers: {inserted:,}/{len(customers):,}")
 
 
 async def insert_orders(conn: asyncpg.Connection, orders: list[dict]):
-    """Bulk insert orders using INSERT ON CONFLICT DO NOTHING for idempotency."""
+    """Bulk insert orders through COPY staging, then merge idempotently."""
     print(f"  Inserting {len(orders):,} orders...")
     batch_size = 5000
     inserted = 0
+    await conn.execute(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS tmp_orders (
+            id UUID,
+            customer_id UUID,
+            amount NUMERIC(10,2),
+            status VARCHAR(20),
+            created_at TIMESTAMP
+        )
+        """
+    )
     for i in range(0, len(orders), batch_size):
         batch = orders[i:i + batch_size]
-        try:
-            await conn.executemany(
-                """
-                INSERT INTO orders (id, customer_id, amount, status, created_at)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                [
-                    (
-                        uuid.UUID(o["id"]),
-                        uuid.UUID(o["customer_id"]),
-                        float(o["amount"]),
-                        o["status"],
-                        datetime.fromisoformat(o["created_at"]),
-                    )
-                    for o in batch
-                ],
-            )
-            inserted += len(batch)
-            if inserted % 100_000 == 0 or inserted == len(orders):
-                print(f"    Orders: {inserted:,}/{len(orders):,}")
-        except Exception as e:
-            print(f"    Error inserting order batch at offset {i}: {e}")
+        await conn.execute("TRUNCATE tmp_orders")
+        await conn.copy_records_to_table(
+            "tmp_orders",
+            records=[
+                (
+                    uuid.UUID(o["id"]),
+                    uuid.UUID(o["customer_id"]),
+                    Decimal(str(o["amount"])),
+                    o["status"],
+                    datetime.fromisoformat(o["created_at"]),
+                )
+                for o in batch
+            ],
+        )
+        await conn.execute(
+            """
+            INSERT INTO orders (id, customer_id, amount, status, created_at)
+            SELECT id, customer_id, amount, status, created_at
+            FROM tmp_orders
+            ON CONFLICT (id) DO UPDATE SET
+                customer_id = EXCLUDED.customer_id,
+                amount = EXCLUDED.amount,
+                status = EXCLUDED.status,
+                created_at = EXCLUDED.created_at
+            """
+        )
+        inserted += len(batch)
+        if inserted % 100_000 == 0 or inserted == len(orders):
+            print(f"    Orders: {inserted:,}/{len(orders):,}")
 
 
 async def insert_refunds(conn: asyncpg.Connection, refunds: list[dict]):
-    """Bulk insert refunds using INSERT ON CONFLICT DO NOTHING for idempotency."""
+    """Bulk insert refunds through COPY staging, then merge idempotently."""
     print(f"  Inserting {len(refunds):,} refunds...")
     batch_size = 5000
     inserted = 0
+    await conn.execute(
+        """
+        CREATE TEMP TABLE IF NOT EXISTS tmp_refunds (
+            id UUID,
+            order_id UUID,
+            amount NUMERIC(10,2),
+            created_at TIMESTAMP
+        )
+        """
+    )
     for i in range(0, len(refunds), batch_size):
         batch = refunds[i:i + batch_size]
-        try:
-            await conn.executemany(
-                """
-                INSERT INTO refunds (id, order_id, amount, created_at)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (id) DO NOTHING
-                """,
-                [
-                    (
-                        uuid.UUID(r["id"]),
-                        uuid.UUID(r["order_id"]),
-                        float(r["amount"]),
-                        datetime.fromisoformat(r["created_at"]),
-                    )
-                    for r in batch
-                ],
-            )
-            inserted += len(batch)
-            if inserted % 50_000 == 0 or inserted == len(refunds):
-                print(f"    Refunds: {inserted:,}/{len(refunds):,}")
-        except Exception as e:
-            print(f"    Error inserting refund batch at offset {i}: {e}")
+        await conn.execute("TRUNCATE tmp_refunds")
+        await conn.copy_records_to_table(
+            "tmp_refunds",
+            records=[
+                (
+                    uuid.UUID(r["id"]),
+                    uuid.UUID(r["order_id"]),
+                    Decimal(str(r["amount"])),
+                    datetime.fromisoformat(r["created_at"]),
+                )
+                for r in batch
+            ],
+        )
+        await conn.execute(
+            """
+            INSERT INTO refunds (id, order_id, amount, created_at)
+            SELECT id, order_id, amount, created_at
+            FROM tmp_refunds
+            ON CONFLICT (id) DO UPDATE SET
+                order_id = EXCLUDED.order_id,
+                amount = EXCLUDED.amount,
+                created_at = EXCLUDED.created_at
+            """
+        )
+        inserted += len(batch)
+        if inserted % 50_000 == 0 or inserted == len(refunds):
+            print(f"    Refunds: {inserted:,}/{len(refunds):,}")
 
 
 async def refresh_views(conn: asyncpg.Connection):
@@ -191,13 +258,14 @@ async def run_ingestion():
     print("\n[2/4] Inserting data into PostgreSQL...")
     conn = await asyncpg.connect(ASYNCPG_DSN)
     try:
-        await insert_customers(conn, customers)
-        await insert_orders(conn, orders)
-        await insert_refunds(conn, refunds)
+        async with conn.transaction():
+            await insert_customers(conn, customers)
+            await insert_orders(conn, orders)
+            await insert_refunds(conn, refunds)
 
-        # Step 3: Refresh materialized views
-        print("\n[3/4] Post-processing...")
-        await refresh_views(conn)
+            # Step 3: Refresh materialized views
+            print("\n[3/4] Post-processing...")
+            await refresh_views(conn)
     finally:
         await conn.close()
 
